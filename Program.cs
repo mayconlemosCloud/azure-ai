@@ -44,30 +44,31 @@ public class Program
             userWantsToHear = true;
             Console.WriteLine();
             SelectLocalAudioDevice();
+            otherWantsToHear = false;
         }
         else
         {
             userWantsToHear = false;
             Console.WriteLine("✓ Sem áudio local\n");
-        }
 
-        // Pergunta 2: Quer que a pessoa te escute?
-        Console.WriteLine("👥 Quer que outras pessoas te escutem (via Discord/OBS)?");
-        Console.WriteLine("1️⃣  Sim, quero compartilhar o áudio");
-        Console.WriteLine("2️⃣  Não, sem áudio virtual\n");
-        Console.Write("Digite sua opção (1 ou 2): ");
-        string option2 = Console.ReadLine();
+            // Pergunta 2: Quer que a pessoa te escute? (apenas se NÃO quer ouvir)
+            Console.WriteLine("👥 Quer que outras pessoas te escutem (via Discord/OBS)?");
+            Console.WriteLine("1️⃣  Sim, quero compartilhar o áudio");
+            Console.WriteLine("2️⃣  Não, sem áudio virtual\n");
+            Console.Write("Digite sua opção (1 ou 2): ");
+            string option2 = Console.ReadLine();
 
-        if (option2 == "1")
-        {
-            otherWantsToHear = true;
-            Console.WriteLine();
-            SelectVirtualAudioDevice();
-        }
-        else
-        {
-            otherWantsToHear = false;
-            Console.WriteLine("✓ Sem áudio virtual\n");
+            if (option2 == "1")
+            {
+                otherWantsToHear = true;
+                Console.WriteLine();
+                SelectVirtualAudioDevice();
+            }
+            else
+            {
+                otherWantsToHear = false;
+                Console.WriteLine("✓ Sem áudio virtual\n");
+            }
         }
 
         DisplayAudioConfig();
