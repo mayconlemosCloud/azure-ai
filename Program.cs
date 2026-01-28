@@ -363,6 +363,24 @@ public class Program
             // Usar cache para SpeechConfig
             var speechConfig = GetCachedSpeechConfig(speechKey, region);
             speechConfig.SpeechSynthesisLanguage = language;
+
+            // Se nenhuma voz foi especificada, usar uma voz neural natural por padrão
+            if (string.IsNullOrEmpty(voiceName))
+            {
+                voiceName = language switch
+                {
+                    "pt-BR" => "pt-BR-BrendaNeural",      // Voz feminina natural brasileira
+                    "pt-PT" => "pt-PT-FernandaNeural",     // Voz feminina natural portuguesa
+                    "en-US" => "en-US-AriaNeural",         // Voz feminina natural em inglês
+                    "es-ES" => "es-ES-ElviraNeural",       // Voz feminina natural em espanhol
+                    "fr-FR" => "fr-FR-DeniseNeural",       // Voz feminina natural em francês
+                    "de-DE" => "de-DE-KatjaNeural",        // Voz feminina natural em alemão
+                    "it-IT" => "it-IT-IsabellaNeural",     // Voz feminina natural em italiano
+                    "ja-JP" => "ja-JP-NanamiNeural",       // Voz feminina natural em japonês
+                    _ => "pt-BR-BrendaNeural"              // Padrão: português brasileiro
+                };
+            }
+
             speechConfig.SpeechSynthesisVoiceName = voiceName;
 
             // Se um dispositivo foi selecionado, usar MemoryStream (MAIS RÁPIDO que arquivo)
@@ -391,7 +409,9 @@ public class Program
                     using (var audioConfig = AudioConfig.FromStreamOutput(pushStream))
                     using (var synthesizer = new SpeechSynthesizer(speechConfig, audioConfig))
                     {
-                        var result = await synthesizer.SpeakTextAsync(text);
+                        // Criar SSML com prosódia para voz mais natural
+                        string ssml = CreateSSML(text, language, voiceName);
+                        var result = await synthesizer.SpeakSsmlAsync(ssml);
 
                         if (result.Reason == ResultReason.SynthesizingAudioCompleted)
                         {
@@ -400,6 +420,10 @@ public class Program
 
                             // Reproduzir do stream de memória (bem mais rápido!)
                             await PlayAudioFromMemoryOptimizedAsync(audioStream, selectedOutputDevice);
+
+                            // IMPORTANTE: Adicionar silêncio para evitar feedback loop
+                            // Isso impede que o microfone capte o áudio de síntese
+                            await Task.Delay(500);
                         }
                         else if (result.Reason == ResultReason.Canceled)
                         {
@@ -421,11 +445,14 @@ public class Program
                 using (var synthesizer = new SpeechSynthesizer(speechConfig, audioConfig))
                 {
                     Console.WriteLine("🔊 Reproduzindo áudio traduzido...");
-                    var result = await synthesizer.SpeakTextAsync(text);
+                    string ssml = CreateSSML(text, language, voiceName);
+                    var result = await synthesizer.SpeakSsmlAsync(ssml);
 
                     if (result.Reason == ResultReason.SynthesizingAudioCompleted)
                     {
                         Console.WriteLine("✓ Áudio reproduzido com sucesso!\n");
+                        // Pausa para evitar feedback do microfone
+                        await Task.Delay(500);
                     }
                     else if (result.Reason == ResultReason.Canceled)
                     {
@@ -515,5 +542,39 @@ public class Program
         }
 
         return devices;
+    }
+
+    // Criar SSML com prosódia para voz mais natural
+    static string CreateSSML(string text, string language, string voiceName)
+    {
+        // Escapar caracteres especiais para XML
+        text = System.Security.SecurityElement.Escape(text);
+
+        // Configurações de prosódia por idioma
+        string rate = "1.0";
+        string pitch = "0%";
+
+        if (language?.StartsWith("pt-") ?? false)
+        {
+            rate = "0.95";
+            pitch = "2%";
+        }
+        else if (language?.StartsWith("en-") ?? false)
+        {
+            rate = "1.0";
+            pitch = "0%";
+        }
+        else if (language?.StartsWith("es-") ?? false)
+        {
+            rate = "0.98";
+            pitch = "1%";
+        }
+        else if (language?.StartsWith("fr-") ?? false)
+        {
+            rate = "0.96";
+            pitch = "3%";
+        }
+
+        return $"<speak version='1.0' xml:lang='{language}' xmlns='http://www.w3.org/2001/10/synthesis'><voice name='{voiceName}'><prosody rate='{rate}' pitch='{pitch}'>{text}</prosody></voice></speak>";
     }
 }
