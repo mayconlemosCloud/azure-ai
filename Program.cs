@@ -15,40 +15,88 @@ using dotenv.net;
 
 public class Program
 {
+    static string selectedOutputDevice = "";
+    static bool userWantsToHear = false;
+    static bool otherWantsToHear = false;
+
     static async Task Main(string[] args)
     {
         DotEnv.Load();
         DisplayHeader();
-        SelectAudioDevice();
+        SelectAudioConfiguration();
         await TestAzureSpeechConnection();
         await StartRealTimeTranslation();
     }
 
-    static void SelectAudioDevice()
+    static void SelectAudioConfiguration()
     {
-        Console.WriteLine("🔊 Detectando dispositivos de áudio disponíveis...\n");
+        Console.WriteLine("⚙️  CONFIGURAÇÃO DE ÁUDIO\n");
 
-        var devices = GetAudioDevices();
+        // Pergunta 1: Você quer se ouvir?
+        Console.WriteLine("🎧 Você quer se ouvir (ouvir o áudio traduzido)?");
+        Console.WriteLine("1️⃣  Sim, quero ouvir");
+        Console.WriteLine("2️⃣  Não, sem áudio local\n");
+        Console.Write("Digite sua opção (1 ou 2): ");
+        string option1 = Console.ReadLine();
+
+        if (option1 == "1")
+        {
+            userWantsToHear = true;
+            Console.WriteLine();
+            SelectLocalAudioDevice();
+        }
+        else
+        {
+            userWantsToHear = false;
+            Console.WriteLine("✓ Sem áudio local\n");
+        }
+
+        // Pergunta 2: Quer que a pessoa te escute?
+        Console.WriteLine("👥 Quer que outras pessoas te escutem (via Discord/OBS)?");
+        Console.WriteLine("1️⃣  Sim, quero compartilhar o áudio");
+        Console.WriteLine("2️⃣  Não, sem áudio virtual\n");
+        Console.Write("Digite sua opção (1 ou 2): ");
+        string option2 = Console.ReadLine();
+
+        if (option2 == "1")
+        {
+            otherWantsToHear = true;
+            Console.WriteLine();
+            SelectVirtualAudioDevice();
+        }
+        else
+        {
+            otherWantsToHear = false;
+            Console.WriteLine("✓ Sem áudio virtual\n");
+        }
+
+        DisplayAudioConfig();
+    }
+
+    static void SelectLocalAudioDevice()
+    {
+        Console.WriteLine("🔊 Selecione onde VOCÊ quer ouvir o áudio traduzido:\n");
+
+        var devices = GetAudioDevices(DataFlow.Render).Where(d => !d.Contains("CABLE")).ToList();
 
         if (devices.Count == 0)
         {
-            Console.WriteLine("❌ Nenhum dispositivo de áudio encontrado!\n");
+            Console.WriteLine("❌ Nenhum dispositivo local encontrado!\n");
+            userWantsToHear = false;
             return;
         }
 
-        Console.WriteLine("Dispositivos encontrados:\n");
         for (int i = 0; i < devices.Count; i++)
         {
             Console.WriteLine($"{i + 1}️⃣  {devices[i]}");
         }
 
-        Console.Write($"\nDigite o número do dispositivo (1-{devices.Count}): ");
+        Console.Write($"\nDigite o número (1-{devices.Count}): ");
         string option = Console.ReadLine();
-        Console.WriteLine();
 
         if (int.TryParse(option, out int deviceIndex) && deviceIndex > 0 && deviceIndex <= devices.Count)
         {
-            Console.WriteLine($"✓ Dispositivo selecionado: {devices[deviceIndex - 1]}\n");
+            Console.WriteLine($"✓ Você ouvirá em: {devices[deviceIndex - 1]}\n");
         }
         else
         {
@@ -56,27 +104,56 @@ public class Program
         }
     }
 
-    static List<string> GetAudioDevices()
+    static void SelectVirtualAudioDevice()
     {
-        var devices = new List<string>();
+        Console.WriteLine("🎙️  Selecione por onde OUTRAS PESSOAS vão ouvir (via Discord/OBS):\n");
 
-        try
+        var allDevices = GetAudioDevices(DataFlow.Render);
+        Console.WriteLine("📊 Dispositivos disponíveis (DEBUG):");
+        foreach (var dev in allDevices)
         {
-            // Dispositivos de reprodução (speakers)
-            var enumerator = new MMDeviceEnumerator();
-            var renderDevices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
-
-            foreach (var device in renderDevices)
-            {
-                devices.Add(device.FriendlyName);
-            }
+            Console.WriteLine($"  - {dev}");
         }
-        catch (Exception ex)
+        Console.WriteLine();
+
+        var devices = allDevices.Where(d => d.Contains("CABLE")).ToList();
+
+        if (devices.Count == 0)
         {
-            Console.WriteLine($"⚠️  Erro ao enumerar dispositivos: {ex.Message}");
+            Console.WriteLine("❌ Nenhum dispositivo virtual encontrado!");
+            Console.WriteLine("⚠️  Instale VB-Audio Virtual Cable para compartilhar áudio\n");
+            otherWantsToHear = false;
+            return;
         }
 
-        return devices;
+        for (int i = 0; i < devices.Count; i++)
+        {
+            Console.WriteLine($"{i + 1}️⃣  {devices[i]}");
+        }
+
+        Console.Write($"\nDigite o número (1-{devices.Count}): ");
+        string option = Console.ReadLine();
+
+        if (int.TryParse(option, out int deviceIndex) && deviceIndex > 0 && deviceIndex <= devices.Count)
+        {
+            selectedOutputDevice = devices[deviceIndex - 1];
+            Console.WriteLine($"✓ Outras pessoas ouvirão em: {selectedOutputDevice}\n");
+        }
+        else
+        {
+            Console.WriteLine("❌ Opção inválida!\n");
+            otherWantsToHear = false;
+        }
+    }
+
+    static void DisplayAudioConfig()
+    {
+        Console.WriteLine(new string('=', 50));
+        Console.WriteLine("📋 RESUMO DE CONFIGURAÇÃO");
+        Console.WriteLine(new string('=', 50));
+        Console.WriteLine($"🎧 Você ouve: {(userWantsToHear ? "SIM" : "NÃO")}");
+        Console.WriteLine($"👥 Outros ouvem: {(otherWantsToHear ? "SIM - " + selectedOutputDevice : "NÃO")}");
+        Console.WriteLine(new string('=', 50) + "\n");
     }
 
     static async Task TestAzureSpeechConnection()
@@ -209,20 +286,60 @@ public class Program
             speechConfig.SpeechSynthesisLanguage = language;
             speechConfig.SpeechSynthesisVoiceName = voiceName;
 
-            using (var audioConfig = AudioConfig.FromDefaultSpeakerOutput())
-            using (var synthesizer = new SpeechSynthesizer(speechConfig, audioConfig))
+            // Se um dispositivo foi selecionado, usar arquivo temporário e reproduzir com NAudio
+            if (!string.IsNullOrEmpty(selectedOutputDevice))
             {
-                Console.WriteLine("🔊 Reproduzindo áudio traduzido...");
-                var result = await synthesizer.SpeakTextAsync(text);
+                string tempFile = Path.Combine(Path.GetTempPath(), "traducao_audio.wav");
 
-                if (result.Reason == ResultReason.SynthesizingAudioCompleted)
+                // Deletar arquivo anterior se existir
+                try
                 {
-                    Console.WriteLine("✓ Áudio reproduzido com sucesso!\n");
+                    if (File.Exists(tempFile))
+                        File.Delete(tempFile);
                 }
-                else if (result.Reason == ResultReason.Canceled)
+                catch { }
+
+                // SINTETIZAR - deixar sair do using antes de ler
+                using (var audioConfig = AudioConfig.FromWavFileOutput(tempFile))
+                using (var synthesizer = new SpeechSynthesizer(speechConfig, audioConfig))
                 {
-                    var cancellation = SpeechSynthesisCancellationDetails.FromResult(result);
-                    Console.WriteLine($"❌ Erro na síntese: {cancellation.ErrorDetails}\n");
+                    Console.WriteLine("🔊 Sintetizando áudio traduzido...");
+                    var result = await synthesizer.SpeakTextAsync(text);
+
+                    if (result.Reason != ResultReason.SynthesizingAudioCompleted)
+                    {
+                        if (result.Reason == ResultReason.Canceled)
+                        {
+                            var cancellation = SpeechSynthesisCancellationDetails.FromResult(result);
+                            Console.WriteLine($"❌ Erro na síntese: {cancellation.ErrorDetails}\n");
+                        }
+                        return;
+                    }
+
+                    Console.WriteLine("✓ Áudio sintetizado com sucesso!");
+                } // Aqui o synthesizer e audioConfig são fechados e liberados
+
+                // Agora SIM ler e reproduzir (fora do using)
+                await PlayAudioFromFileAsync(tempFile, selectedOutputDevice);
+            }
+            else if (userWantsToHear)
+            {
+                // Usar dispositivo padrão para o usuário ouvir
+                using (var audioConfig = AudioConfig.FromDefaultSpeakerOutput())
+                using (var synthesizer = new SpeechSynthesizer(speechConfig, audioConfig))
+                {
+                    Console.WriteLine("🔊 Reproduzindo áudio traduzido...");
+                    var result = await synthesizer.SpeakTextAsync(text);
+
+                    if (result.Reason == ResultReason.SynthesizingAudioCompleted)
+                    {
+                        Console.WriteLine("✓ Áudio reproduzido com sucesso!\n");
+                    }
+                    else if (result.Reason == ResultReason.Canceled)
+                    {
+                        var cancellation = SpeechSynthesisCancellationDetails.FromResult(result);
+                        Console.WriteLine($"❌ Erro na síntese: {cancellation.ErrorDetails}\n");
+                    }
                 }
             }
         }
@@ -230,5 +347,77 @@ public class Program
         {
             Console.WriteLine($"❌ Erro ao reproduzir áudio: {ex.Message}\n");
         }
+    }
+
+    static async Task PlayAudioFromFileAsync(string filePath, string deviceName)
+    {
+        try
+        {
+            var enumerator = new MMDeviceEnumerator();
+            var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
+            int deviceIndex = -1;
+            int currentIndex = 0;
+
+            foreach (var device in devices)
+            {
+                if (device.FriendlyName == deviceName)
+                {
+                    deviceIndex = currentIndex;
+                    break;
+                }
+                currentIndex++;
+            }
+
+            if (deviceIndex == -1)
+            {
+                Console.WriteLine("⚠️  Dispositivo não encontrado.\n");
+                return;
+            }
+
+            // Aguardar arquivo estar pronto
+            await Task.Delay(300);
+
+            using (var waveFileReader = new WaveFileReader(filePath))
+            using (var waveOutEvent = new WaveOutEvent { DeviceNumber = deviceIndex })
+            {
+                waveOutEvent.Init(waveFileReader);
+                waveOutEvent.Play();
+                Console.WriteLine($"▶️  Reproduzindo em: {deviceName}");
+
+                // Aguardar reprodução terminar
+                while (waveOutEvent.PlaybackState == PlaybackState.Playing)
+                {
+                    await Task.Delay(100);
+                }
+
+                Console.WriteLine("✓ Reprodução concluída!\n");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"❌ Erro ao reproduzir áudio: {ex.Message}\n");
+        }
+    }
+
+    static List<string> GetAudioDevices(DataFlow dataFlow)
+    {
+        var devices = new List<string>();
+
+        try
+        {
+            var enumerator = new MMDeviceEnumerator();
+            var audioDevices = enumerator.EnumerateAudioEndPoints(dataFlow, DeviceState.Active);
+
+            foreach (var device in audioDevices)
+            {
+                devices.Add(device.FriendlyName);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Erro ao enumerar dispositivos: {ex.Message}");
+        }
+
+        return devices;
     }
 }
