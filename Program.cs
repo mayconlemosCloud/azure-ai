@@ -6,6 +6,7 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
+using System.Collections.Concurrent;
 using Microsoft.CognitiveServices.Speech;
 using Microsoft.CognitiveServices.Speech.Audio;
 using Microsoft.CognitiveServices.Speech.Translation;
@@ -13,11 +14,48 @@ using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using dotenv.net;
 
+// Classe helper para callback de PushAudioOutputStream
+public class PushStreamCallback : PushAudioOutputStreamCallback
+{
+    private Action<byte[]> onAudioData;
+
+    public PushStreamCallback(Action<byte[]> onAudioData)
+    {
+        this.onAudioData = onAudioData;
+    }
+
+    public override uint Write(byte[] dataBuffer)
+    {
+        onAudioData?.Invoke(dataBuffer);
+        return (uint)dataBuffer.Length;
+    }
+
+    public override void Close()
+    {
+        // Nada a fazer
+    }
+}
+
 public class Program
 {
     static string selectedOutputDevice = "";
     static bool userWantsToHear = false;
     static bool otherWantsToHear = false;
+
+    // Cache de configurações para evitar recriação
+    static SpeechConfig? cachedSpeechConfig = null;
+    static SpeechTranslationConfig? cachedTranslationConfig = null;
+    static string cachedSpeechKey = "";
+    static string cachedRegion = "";
+
+    // Token para cancellation
+    static CancellationTokenSource? translationCancellation = null;
+
+    // Pool de MemoryStream para reuso (melhor performance)
+    static readonly ConcurrentBag<MemoryStream> memoryStreamPool = new ConcurrentBag<MemoryStream>();
+
+    // Cache de dispositivos de áudio (Lazy initialization)
+    static readonly Lazy<MMDeviceEnumerator> deviceEnumerator = new Lazy<MMDeviceEnumerator>(() => new MMDeviceEnumerator());
 
     static async Task Main(string[] args)
     {
@@ -25,6 +63,7 @@ public class Program
         DisplayHeader();
         SelectAudioConfiguration();
         await TestAzureSpeechConnection();
+        translationCancellation = new CancellationTokenSource();
         await StartRealTimeTranslation();
     }
 
@@ -227,48 +266,62 @@ public class Program
             string synthesisLanguage = Environment.GetEnvironmentVariable("SYNTHESIS_LANGUAGE");
             string voiceName = Environment.GetEnvironmentVariable("VOICE_NAME");
 
-            var speechConfig = SpeechConfig.FromSubscription(speechKey, region);
-            speechConfig.SpeechRecognitionLanguage = "pt-BR";
-
-            var translationConfig = SpeechTranslationConfig.FromSubscription(speechKey, region);
+            // Usar cache de configurações para evitar recriação a cada loop
+            var translationConfig = GetCachedTranslationConfig(speechKey, region);
             translationConfig.SpeechRecognitionLanguage = "pt-BR";
             translationConfig.AddTargetLanguage(targetLanguage ?? "en");
 
             using (var audioConfig = AudioConfig.FromDefaultMicrophoneInput())
+            using (var recognizer = new TranslationRecognizer(translationConfig, audioConfig))
             {
-                using (var recognizer = new TranslationRecognizer(translationConfig, audioConfig))
+                Console.WriteLine("🎤 Fale algo em português... (pressione Ctrl+C para parar)\n");
+
+                // Usar reconhecimento contínuo é MUITO mais rápido que RecognizeOnceAsync
+                recognizer.Recognizing += (s, e) =>
                 {
-                    Console.WriteLine("🎤 Fale algo em português... (pressione Enter para parar)\n");
-
-                    while (true)
+                    if (!string.IsNullOrWhiteSpace(e.Result.Text))
                     {
-                        Console.Write("Aguardando áudio... ");
-                        var result = await recognizer.RecognizeOnceAsync();
+                        Console.WriteLine($"🔄 Reconhecendo: {e.Result.Text}");
+                    }
+                };
 
-                        if (result.Reason == ResultReason.TranslatedSpeech)
-                        {
-                            Console.WriteLine($"✓ Reconhecido (PT-BR): {result.Text}");
+                recognizer.Recognized += async (s, e) =>
+                {
+                    if (e.Result.Reason == ResultReason.TranslatedSpeech)
+                    {
+                        Console.WriteLine($"✓ Reconhecido (PT-BR): {e.Result.Text}");
 
-                            if (result.Translations.ContainsKey(targetLanguage))
-                            {
-                                string translatedText = result.Translations[targetLanguage];
-                                Console.WriteLine($"✓ Traduzido ({targetLanguage.ToUpper()}): {translatedText}\n");
+                        if (e.Result.Translations.ContainsKey(targetLanguage))
+                        {
+                            string translatedText = e.Result.Translations[targetLanguage];
+                            Console.WriteLine($"✓ Traduzido ({targetLanguage.ToUpper()}): {translatedText}\n");
 
-                                await SynthesizeAndPlayAudio(speechKey, region, translatedText, synthesisLanguage, voiceName);
-                            }
-                        }
-                        else if (result.Reason == ResultReason.NoMatch)
-                        {
-                            Console.WriteLine("⚠️  Nenhuma fala detectada\n");
-                        }
-                        else if (result.Reason == ResultReason.Canceled)
-                        {
-                            var cancellation = CancellationDetails.FromResult(result);
-                            Console.WriteLine($"❌ Erro: {cancellation.ErrorDetails}\n");
-                            break;
+                            // Executar síntese e reprodução
+                            await SynthesizeAndPlayAudioOptimized(speechKey, region, translatedText, synthesisLanguage, voiceName);
                         }
                     }
+                    else if (e.Result.Reason == ResultReason.NoMatch)
+                    {
+                        Console.WriteLine("⚠️  Nenhuma fala detectada\n");
+                    }
+                };
+
+                recognizer.Canceled += (s, e) =>
+                {
+                    var cancellation = CancellationDetails.FromResult(e.Result);
+                    Console.WriteLine($"❌ Erro: {cancellation.ErrorDetails}\n");
+                };
+
+                // INICIAR RECONHECIMENTO CONTÍNUO
+                await recognizer.StartContinuousRecognitionAsync();
+
+                // Aguardar até ser cancelado
+                while (!translationCancellation?.Token.IsCancellationRequested ?? true)
+                {
+                    await Task.Delay(100);
                 }
+
+                await recognizer.StopContinuousRecognitionAsync();
             }
 
             Console.WriteLine("\n✅ Tradução finalizada!");
@@ -279,53 +332,91 @@ public class Program
         }
     }
 
-    static async Task SynthesizeAndPlayAudio(string speechKey, string region, string text, string language, string voiceName)
+    // Método auxiliar para cache de SpeechTranslationConfig
+    static SpeechTranslationConfig GetCachedTranslationConfig(string speechKey, string region)
+    {
+        if (cachedTranslationConfig == null || cachedSpeechKey != speechKey || cachedRegion != region)
+        {
+            cachedTranslationConfig = SpeechTranslationConfig.FromSubscription(speechKey, region);
+            cachedSpeechKey = speechKey;
+            cachedRegion = region;
+        }
+        return cachedTranslationConfig;
+    }
+
+    // Método auxiliar para cache de SpeechConfig
+    static SpeechConfig GetCachedSpeechConfig(string speechKey, string region)
+    {
+        if (cachedSpeechConfig == null || cachedSpeechKey != speechKey || cachedRegion != region)
+        {
+            cachedSpeechConfig = SpeechConfig.FromSubscription(speechKey, region);
+            cachedSpeechKey = speechKey;
+            cachedRegion = region;
+        }
+        return cachedSpeechConfig;
+    }
+
+    static async Task SynthesizeAndPlayAudioOptimized(string speechKey, string region, string text, string language, string voiceName)
     {
         try
         {
-            var speechConfig = SpeechConfig.FromSubscription(speechKey, region);
+            // Usar cache para SpeechConfig
+            var speechConfig = GetCachedSpeechConfig(speechKey, region);
             speechConfig.SpeechSynthesisLanguage = language;
             speechConfig.SpeechSynthesisVoiceName = voiceName;
 
-            // Se um dispositivo foi selecionado, usar arquivo temporário e reproduzir com NAudio
+            // Se um dispositivo foi selecionado, usar MemoryStream (MAIS RÁPIDO que arquivo)
             if (!string.IsNullOrEmpty(selectedOutputDevice))
             {
-                string tempFile = Path.Combine(Path.GetTempPath(), "traducao_audio.wav");
+                Console.WriteLine("🔊 Sintetizando áudio traduzido (memória)...");
 
-                // Deletar arquivo anterior se existir
+                // Pegar MemoryStream do pool ou criar novo
+                if (!memoryStreamPool.TryTake(out var audioStream))
+                {
+                    audioStream = new MemoryStream(65536); // Pré-alocar 64KB para melhor performance
+                }
+
+                audioStream.Position = 0;
+                audioStream.SetLength(0); // Limpar stream reutilizado
+
                 try
                 {
-                    if (File.Exists(tempFile))
-                        File.Delete(tempFile);
-                }
-                catch { }
-
-                // SINTETIZAR - deixar sair do using antes de ler
-                using (var audioConfig = AudioConfig.FromWavFileOutput(tempFile))
-                using (var synthesizer = new SpeechSynthesizer(speechConfig, audioConfig))
-                {
-                    Console.WriteLine("🔊 Sintetizando áudio traduzido...");
-                    var result = await synthesizer.SpeakTextAsync(text);
-
-                    if (result.Reason != ResultReason.SynthesizingAudioCompleted)
+                    // SINTETIZAR direto em memória usando PushAudioOutputStream com callback
+                    byte[] audioData = null;
+                    var pushStream = AudioOutputStream.CreatePushStream(new PushStreamCallback(audioBytes =>
                     {
-                        if (result.Reason == ResultReason.Canceled)
+                        audioStream.Write(audioBytes, 0, audioBytes.Length);
+                    }));
+
+                    using (var audioConfig = AudioConfig.FromStreamOutput(pushStream))
+                    using (var synthesizer = new SpeechSynthesizer(speechConfig, audioConfig))
+                    {
+                        var result = await synthesizer.SpeakTextAsync(text);
+
+                        if (result.Reason == ResultReason.SynthesizingAudioCompleted)
+                        {
+                            audioStream.Position = 0;
+                            Console.WriteLine("✓ Áudio sintetizado com sucesso!");
+
+                            // Reproduzir do stream de memória (bem mais rápido!)
+                            await PlayAudioFromMemoryOptimizedAsync(audioStream, selectedOutputDevice);
+                        }
+                        else if (result.Reason == ResultReason.Canceled)
                         {
                             var cancellation = SpeechSynthesisCancellationDetails.FromResult(result);
                             Console.WriteLine($"❌ Erro na síntese: {cancellation.ErrorDetails}\n");
                         }
-                        return;
                     }
-
-                    Console.WriteLine("✓ Áudio sintetizado com sucesso!");
-                } // Aqui o synthesizer e audioConfig são fechados e liberados
-
-                // Agora SIM ler e reproduzir (fora do using)
-                await PlayAudioFromFileAsync(tempFile, selectedOutputDevice);
+                }
+                finally
+                {
+                    // Devolver stream ao pool para reuso
+                    memoryStreamPool.Add(audioStream);
+                }
             }
             else if (userWantsToHear)
             {
-                // Usar dispositivo padrão para o usuário ouvir
+                // Usar dispositivo padrão para o usuário ouvir (mais rápido)
                 using (var audioConfig = AudioConfig.FromDefaultSpeakerOutput())
                 using (var synthesizer = new SpeechSynthesizer(speechConfig, audioConfig))
                 {
@@ -350,15 +441,17 @@ public class Program
         }
     }
 
-    static async Task PlayAudioFromFileAsync(string filePath, string deviceName)
+    // Versão otimizada: reproduz áudio PCM bruto diretamente da memória
+    static async Task PlayAudioFromMemoryOptimizedAsync(MemoryStream audioStream, string deviceName)
     {
         try
         {
-            var enumerator = new MMDeviceEnumerator();
+            var enumerator = deviceEnumerator.Value;
             var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
             int deviceIndex = -1;
             int currentIndex = 0;
 
+            // Busca rápida do dispositivo
             foreach (var device in devices)
             {
                 if (device.FriendlyName == deviceName)
@@ -375,20 +468,22 @@ public class Program
                 return;
             }
 
-            // Aguardar arquivo estar pronto
-            await Task.Delay(300);
+            // Azure Speech entrega PCM bruto (16-bit, 16kHz, mono)
+            // Usar RawSourceWaveStream para ler PCM bruto sem header RIFF
+            audioStream.Position = 0;
+            var waveFormat = new WaveFormat(16000, 16, 1); // 16kHz, 16-bit, mono
 
-            using (var waveFileReader = new WaveFileReader(filePath))
+            using (var rawStream = new RawSourceWaveStream(audioStream, waveFormat))
             using (var waveOutEvent = new WaveOutEvent { DeviceNumber = deviceIndex })
             {
-                waveOutEvent.Init(waveFileReader);
+                waveOutEvent.Init(rawStream);
                 waveOutEvent.Play();
                 Console.WriteLine($"▶️  Reproduzindo em: {deviceName}");
 
                 // Aguardar reprodução terminar
                 while (waveOutEvent.PlaybackState == PlaybackState.Playing)
                 {
-                    await Task.Delay(100);
+                    await Task.Delay(50);
                 }
 
                 Console.WriteLine("✓ Reprodução concluída!\n");
