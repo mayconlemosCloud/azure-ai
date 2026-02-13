@@ -41,8 +41,8 @@ public class ConsoleUI
         {
             SelectLocalAudioDevice();
             DisplayAudioConfig(userWantsToHear, false, null);
-            return new AudioConfiguration 
-            { 
+            return new AudioConfiguration
+            {
                 UserWantsToHear = true,
                 OthersWantToHear = false
             };
@@ -62,8 +62,8 @@ public class ConsoleUI
             {
                 string selectedDevice = SelectVirtualAudioDevice();
                 DisplayAudioConfig(false, !string.IsNullOrEmpty(selectedDevice), selectedDevice);
-                return new AudioConfiguration 
-                { 
+                return new AudioConfiguration
+                {
                     UserWantsToHear = false,
                     OthersWantToHear = !string.IsNullOrEmpty(selectedDevice),
                     SelectedOutputDevice = selectedDevice
@@ -73,8 +73,8 @@ public class ConsoleUI
             {
                 Console.WriteLine("✓ Sem áudio virtual\n");
                 DisplayAudioConfig(false, false, null);
-                return new AudioConfiguration 
-                { 
+                return new AudioConfiguration
+                {
                     UserWantsToHear = false,
                     OthersWantToHear = false
                 };
@@ -82,7 +82,7 @@ public class ConsoleUI
         }
     }
 
-    public void TestAzureConnection(string region, string? recognitionLang, 
+    public void TestAzureConnection(string region, string? recognitionLang,
         string? translationLang, string? synthesisLang, string? voiceName)
     {
         try
@@ -180,7 +180,7 @@ public class ConsoleUI
         Console.WriteLine(new string('=', 50) + "\n");
     }
 
-    private void DisplayConfig(string region, string? recognitionLang, string? translationLang, 
+    private void DisplayConfig(string region, string? recognitionLang, string? translationLang,
         string? synthesisLang, string? voiceName)
     {
         Console.WriteLine("✓ Variáveis carregadas:");

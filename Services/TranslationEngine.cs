@@ -86,8 +86,8 @@ public class TranslationEngine
     private async Task OnRecognized(string translatedText)
     {
         // Orquestração da síntese e reprodução
-        string outputDevice = _audioConfig.OthersWantToHear 
-            ? _audioConfig.SelectedOutputDevice ?? "" 
+        string outputDevice = _audioConfig.OthersWantToHear
+            ? _audioConfig.SelectedOutputDevice ?? ""
             : "";
 
         await _speechProvider.SynthesizeAndPlayAsync(
